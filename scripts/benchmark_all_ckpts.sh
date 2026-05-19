@@ -8,9 +8,13 @@ set -euo pipefail
 CKPT_ROOT="${CKPT_ROOT:-/sensei-fs-3/users/thanhl/d-spec/outputs/continual-qwen3-4b-dflash-perfectblend-chat}"
 TARGET_MODEL="${TARGET_MODEL:-Qwen/Qwen3-4B}"
 RUN_NAME="${RUN_NAME:-continual_qwen3_4b_chat}"
+# Pretrained DFlash checkpoint to bench as the "before continual training"
+# baseline. Set to empty to skip. Accepts a HF hub id or a local path.
+BASELINE_DRAFT="${BASELINE_DRAFT:-z-lab/Qwen3-4B-DFlash-b16}"
 LOG_DIR="${LOG_DIR:-logs/${RUN_NAME}/$(date +%Y%m%d_%H%M%S)}"
-# Number of checkpoints to bench, starting from the latest step and walking
-# backwards. Set to 0 to run every checkpoint in CKPT_ROOT.
+# Number of checkpoints to bench (evenly spaced across training, always
+# includes the first and last). Latest checkpoint runs first so partial runs
+# still surface the most-recent number. Set to 0 to run every checkpoint.
 MAX_CKPTS="${MAX_CKPTS:-8}"
 
 cd "$(dirname "$0")/.."
@@ -21,10 +25,10 @@ if [ ! -d "${CKPT_ROOT}" ]; then
     exit 1
 fi
 
-# Sort by step DESCENDING so latest checkpoint runs first.
+# Sort by step ascending so spaced sampling spans the whole training run.
 mapfile -t CKPTS < <(
     find "${CKPT_ROOT}" -mindepth 1 -maxdepth 1 -type d -name 'epoch_*_step_*' \
-        | sort -t_ -k4n -r
+        | sort -t_ -k4n
 )
 
 if [ "${#CKPTS[@]}" -eq 0 ]; then
@@ -34,11 +38,38 @@ fi
 
 total=${#CKPTS[@]}
 if [ "${MAX_CKPTS}" -gt 0 ] && [ "${total}" -gt "${MAX_CKPTS}" ]; then
-    CKPTS=("${CKPTS[@]:0:${MAX_CKPTS}}")
-    echo "Selected latest ${#CKPTS[@]} of ${total} checkpoints (newest first):"
+    selected=()
+    if [ "${MAX_CKPTS}" -eq 1 ]; then
+        selected+=("${CKPTS[$((total - 1))]}")
+    else
+        for ((i=0; i<MAX_CKPTS; i++)); do
+            idx=$(( i * (total - 1) / (MAX_CKPTS - 1) ))
+            selected+=("${CKPTS[$idx]}")
+        done
+    fi
+    CKPTS=("${selected[@]}")
+    msg="Sampled ${#CKPTS[@]} of ${total} checkpoints (evenly spaced)"
 else
-    echo "Found ${#CKPTS[@]} checkpoint(s) (newest first):"
+    msg="Found ${#CKPTS[@]} checkpoint(s)"
 fi
+
+# Reverse so the latest checkpoint runs first.
+reversed=()
+for ((i=${#CKPTS[@]}-1; i>=0; i--)); do reversed+=("${CKPTS[$i]}"); done
+CKPTS=("${reversed[@]}")
+
+# Insert the pretrained baseline right after the latest continual checkpoint
+# so both critical comparison points run early.
+if [ -n "${BASELINE_DRAFT}" ]; then
+    if [ "${#CKPTS[@]}" -ge 1 ]; then
+        CKPTS=("${CKPTS[0]}" "${BASELINE_DRAFT}" "${CKPTS[@]:1}")
+    else
+        CKPTS=("${BASELINE_DRAFT}")
+    fi
+    msg="${msg} + baseline ${BASELINE_DRAFT}"
+fi
+
+echo "${msg}, running newest first:"
 for c in "${CKPTS[@]}"; do echo "  - $(basename "${c}")"; done
 echo "Target model:  ${TARGET_MODEL}"
 echo "Logs:          ${LOG_DIR}"

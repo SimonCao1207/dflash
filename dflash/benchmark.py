@@ -52,6 +52,13 @@ DATASETS = {
         "format": lambda x: x["prompt"],
         "multi_turn": True,
     },
+    "alpaca": {
+        "load_args": ("tatsu-lab/alpaca",),
+        "load_kwargs": {"split": "train"},
+        "format": lambda x: (
+            "{instruction}\n\n{input}".format(**x) if x.get("input") else x["instruction"]
+        ),
+    },
 }
 
 
